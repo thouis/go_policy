@@ -4,7 +4,7 @@ import os.path
 from neon.initializers import GlorotUniform, Constant, Uniform
 from neon.layers import Conv, GeneralizedCost, Dropout, MergeSum, SkipNode, Activation, Bias, Affine
 from neon.models import Model
-from neon.optimizers import GradientDescentMomentum, Schedule
+from neon.optimizers import GradientDescentMomentum, Schedule, Adagrad, Adadelta
 from neon.transforms import Rectlin, CrossEntropyBinary, Accuracy, Softmax
 from neon.callbacks.callbacks import Callbacks
 from neon.util.argparser import NeonArgparser
@@ -52,30 +52,33 @@ def build_model(depth, nfm):
     layers += [Dropout(),
                Affine(362, init=Uniform(-1.0 / (362 * nfm), 1.0 / (362 * nfm)), activation=Softmax())]
 
-
     return Model(layers=layers)
 
 model = build_model(network_depth, num_features)
 
-h5s = [h5py.File(s.strip()) for s in open(args.hdf5_list)]
+filenames = [s.strip() for s in open(args.hdf5_list)]
+h5s = [h5py.File(f) for f in filenames]
 num_moves = sum(h['X'].shape[0] for h in h5s)
 print("Found {} HDF5 files with {} moves".format(len(h5s), num_moves))
-train = HDF5Iterator([h['X'] for h in h5s],
+train = HDF5Iterator(filenames,
+                     [h['X'] for h in h5s],
                      [h['y'] for h in h5s],
-                     ndata=1024*1024)
-valid = HDF5Iterator([h['X'] for h in h5s],
+                     ndata=(1024 * 1024))
+valid = HDF5Iterator(filenames,
+                     [h['X'] for h in h5s],
                      [h['y'] for h in h5s],
                      ndata=1024)
 
 cost = GeneralizedCost(costfunc=CrossEntropyBinary())
 
-schedule = Schedule(step_config=[5, 10], change=[0.0001, 0.00001])
-opt_gdm = GradientDescentMomentum(learning_rate=0.001,
+schedule = Schedule(step_config=[10, 20], change=[0.001, 0.0001])
+opt_adad = Adadelta(decay=0.95, epsilon=1e-6)
+opt_gdm = GradientDescentMomentum(learning_rate=0.01,
                                   momentum_coef=0.9,
                                   stochastic_round=args.rounding,
                                   schedule=schedule)
 
 callbacks = Callbacks(model, eval_set=valid, metric=Accuracy(), **args.callback_args)
 callbacks.add_save_best_state_callback(os.path.join(args.workspace_dir, "best_state_h5resnet.pkl"))
-model.fit(train, optimizer=opt_gdm, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
+model.fit(train, optimizer=opt_adad, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
 model.save_params(os.path.join(args.workspace_dir, "final_state_h5resnet.pkl"))
