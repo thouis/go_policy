@@ -72,7 +72,7 @@ valid = HDF5Iterator(filenames,
 cost = GeneralizedCost(costfunc=CrossEntropyBinary())
 
 schedule = Schedule(step_config=[10, 20], change=[0.001, 0.0001])
-opt_adad = Adadelta(decay=0.95, epsilon=1e-6)
+opt_adad = Adadelta(decay=0.99, epsilon=1e-6)
 opt_gdm = GradientDescentMomentum(learning_rate=0.01,
                                   momentum_coef=0.9,
                                   stochastic_round=args.rounding,
