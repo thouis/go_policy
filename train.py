@@ -2,9 +2,9 @@ import h5py
 import os.path
 
 from neon.initializers import GlorotUniform, Constant, Uniform
-from neon.layers import Conv, GeneralizedCost, Dropout, MergeSum, SkipNode, Activation, Bias, Affine
+from neon.layers import Conv, GeneralizedCost, Dropout, SkipNode, Activation, Bias, Affine, MergeSum, BatchNorm
 from neon.models import Model
-from neon.optimizers import GradientDescentMomentum, Schedule, Adagrad, Adadelta
+from neon.optimizers import GradientDescentMomentum, Schedule, Adadelta
 from neon.transforms import Rectlin, CrossEntropyBinary, Accuracy, Softmax
 from neon.callbacks.callbacks import Callbacks
 from neon.util.argparser import NeonArgparser
@@ -28,22 +28,25 @@ def conv_params(fsize, relu=True, batch_norm=True):
                 activation=(Rectlin() if relu else None),
                 padding=padding,
                 batch_norm=batch_norm,
+                bias=None,
                 init=GlorotUniform())
 
 def resnet_module(nfm):
     sidepath = SkipNode()
-    mainpath = [Conv(**conv_params((3, 3, nfm))),
+    mainpath = [BatchNorm(),
+                Activation(Rectlin()),
+                Conv(**conv_params((3, 3, nfm))),
                 Bias(Constant()),
-                Conv(**conv_params((3, 3, nfm), relu=False)),
+                Conv(**conv_params((3, 3, nfm), relu=False, batch_norm=False)),
                 Bias(Constant())]
-    return [MergeSum([mainpath, sidepath]),
-            Activation(Rectlin())]
+    return [MergeSum([mainpath, sidepath])]
 
 def build_model(depth, nfm):
     # TODO - per-location bias at each layer
 
     # input - expand to #nfm feature maps
-    layers = [Conv(**conv_params((3, 3, nfm))), Dropout(0.8)]
+    layers = [Conv(**conv_params((3, 3, nfm), batch_norm=False, relu=False)),
+              Dropout(0.8)]
 
     for d in range(depth):
         layers += resnet_module(nfm)
