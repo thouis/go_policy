@@ -2,12 +2,13 @@ import h5py
 import os.path
 
 from neon.initializers import GlorotUniform, Constant, Uniform
-from neon.layers import Conv, GeneralizedCost, Dropout, MergeSum, SkipNode, Activation, Bias, Affine
+from neon.layers import Conv, GeneralizedCost, Dropout, SkipNode, Activation, Bias, Affine, MergeSum
 from neon.models import Model
-from neon.optimizers import GradientDescentMomentum, Schedule, Adagrad, Adadelta
+from neon.optimizers import GradientDescentMomentum, Schedule, Adadelta
 from neon.transforms import Rectlin, CrossEntropyBinary, Accuracy, Softmax
 from neon.callbacks.callbacks import Callbacks
 from neon.util.argparser import NeonArgparser
+from stochastic import DropAll
 
 from data_iterator import HDF5Iterator
 
@@ -30,13 +31,14 @@ def conv_params(fsize, relu=True, batch_norm=True):
                 batch_norm=batch_norm,
                 init=GlorotUniform())
 
-def resnet_module(nfm):
+def resnet_module(nfm, keep_prob=1.0):
     sidepath = SkipNode()
     mainpath = [Conv(**conv_params((3, 3, nfm))),
                 Bias(Constant()),
                 Dropout(keep=0.8),
                 Conv(**conv_params((3, 3, nfm), relu=False)),
-                Bias(Constant())]
+                Bias(Constant()),
+                DropAll(keep_prob)]
     return [MergeSum([mainpath, sidepath]),
             Activation(Rectlin())]
 
@@ -47,7 +49,9 @@ def build_model(depth, nfm):
     layers = [Conv(**conv_params((5, 5, nfm))), Dropout(0.8)]
 
     for d in range(depth):
-        layers += resnet_module(nfm)
+        # stochastic depth with falloff from 1.0 to 0.5 from input to final
+        # output
+        layers += resnet_module(nfm, 1.0 - (0.5 * d) / (depth - 1))
 
     # final output: 1 channel
     layers += [Dropout(0.5),
