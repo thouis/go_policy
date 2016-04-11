@@ -34,6 +34,7 @@ def resnet_module(nfm):
     sidepath = SkipNode()
     mainpath = [Conv(**conv_params((3, 3, nfm))),
                 Bias(Constant()),
+                Dropout(keep=0.8),
                 Conv(**conv_params((3, 3, nfm), relu=False)),
                 Bias(Constant())]
     return [MergeSum([mainpath, sidepath]),
@@ -43,13 +44,13 @@ def build_model(depth, nfm):
     # TODO - per-location bias at each layer
 
     # input - expand to #nfm feature maps
-    layers = [Conv(**conv_params((3, 3, nfm))), Dropout(0.8)]
+    layers = [Conv(**conv_params((5, 5, nfm))), Dropout(0.8)]
 
     for d in range(depth):
         layers += resnet_module(nfm)
 
     # final output: 1 channel
-    layers += [Dropout(),
+    layers += [Dropout(0.5),
                Affine(362, init=Uniform(-1.0 / (362 * nfm), 1.0 / (362 * nfm)), activation=Softmax())]
 
     return Model(layers=layers)
@@ -63,11 +64,13 @@ print("Found {} HDF5 files with {} moves".format(len(h5s), num_moves))
 train = HDF5Iterator(filenames,
                      [h['X'] for h in h5s],
                      [h['y'] for h in h5s],
-                     ndata=(1024 * 1024))
+                     ndata=(256 * 1024),
+                     validation=False)
 valid = HDF5Iterator(filenames,
                      [h['X'] for h in h5s],
                      [h['y'] for h in h5s],
-                     ndata=1024)
+                     ndata=1024,
+                     validation=True)
 
 cost = GeneralizedCost(costfunc=CrossEntropyBinary())
 
