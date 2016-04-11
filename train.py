@@ -24,7 +24,7 @@ network_depth = 16
 num_features = 128
 
 def conv_params(fsize, relu=True, batch_norm=True):
-    padding = {'pad_h': 1, 'pad_w': 1}  # always pad to preserve width and height
+    padding = {'pad_h': fsize[0] // 2, 'pad_w': fsize[1] // 2}  # always pad to preserve width and height
     return dict(fshape=fsize,
                 activation=(Rectlin() if relu else None),
                 padding=padding,
@@ -35,7 +35,6 @@ def resnet_module(nfm, keep_prob=1.0):
     sidepath = SkipNode()
     mainpath = [Conv(**conv_params((3, 3, nfm))),
                 Bias(Constant()),
-                Dropout(keep=0.8),
                 Conv(**conv_params((3, 3, nfm), relu=False)),
                 Bias(Constant()),
                 DropAll(keep_prob)]
@@ -46,7 +45,7 @@ def build_model(depth, nfm):
     # TODO - per-location bias at each layer
 
     # input - expand to #nfm feature maps
-    layers = [Conv(**conv_params((5, 5, nfm))), Dropout(0.8)]
+    layers = [Conv(**conv_params((5, 5, nfm)))]
 
     for d in range(depth):
         # stochastic depth with falloff from 1.0 to 0.5 from input to final
