@@ -2,12 +2,13 @@ import h5py
 import logging
 import numpy as np
 import multiprocessing
+import time
 
 logger = logging.getLogger(__name__)
 
 from neon.data import NervanaDataIterator
 
-def generate_sample_stream(filenames, queue, exit_event, validation=False):
+def generate_sample_stream(filenames, queue, validation=False, remove_history=False):
     '''generates individual samples, puts them on a queue to be read elsewhere'''
 
     hdf5s = [h5py.File(f, 'r') for f in filenames]
@@ -17,7 +18,7 @@ def generate_sample_stream(filenames, queue, exit_event, validation=False):
     input_weights = np.array(input_lengths, dtype=float) / sum(input_lengths)
 
     np.random.seed()
-    while not exit_event.is_set():
+    while True:
         # choose a random move.  If from validation, only first game is chosen
         if validation:
             rand_group = np.random.choice(len(inputs))
@@ -31,7 +32,15 @@ def generate_sample_stream(filenames, queue, exit_event, validation=False):
         else:
             rand_idx = np.random.randint(1, cur_input.shape[0])
 
-        tmp_in = cur_input[rand_idx, ...]
+        try:
+            tmp_in = cur_input[rand_idx, ...]
+        except Exception:
+            print("die", rand_idx, filenames[rand_group], rand_idx)
+            raise
+
+        if remove_history:  # remove most recent move indicators
+            tmp_in[4:12, :, :] = 0
+
         tmp_la = np.zeros((19, 19))
         dest_row, dest_col = cur_labels[rand_idx, ...]
 
@@ -70,7 +79,7 @@ class HDF5Iterator(NervanaDataIterator):
     transforms.
     """
 
-    def __init__(self, filenames, inputs, labels, ndata=(1024 * 1024), name=None, validation=False):
+    def __init__(self, filenames, inputs, labels, ndata=(1024 * 1024), name=None, validation=False, remove_history=False):
         """
             hdf5_input: input dataset to sample from
             hdf5_labels: labels values to sample from (same sample locations)
@@ -81,6 +90,7 @@ class HDF5Iterator(NervanaDataIterator):
         assert self.ndata >= self.be.bsz
         self.start = 0  # how many subimages we have sampled
         self.validation = validation
+        self.remove_history = remove_history
 
         # the data to sample from
         self.filenames = filenames
@@ -103,6 +113,12 @@ class HDF5Iterator(NervanaDataIterator):
         self.host_image = np.zeros(self.dev_image.shape, dtype=self.dev_image.dtype)
         self.host_labels = np.zeros(self.dev_labels.shape, dtype=self.dev_labels.dtype)
 
+        # HDF5 sampler subprocess
+        self.sample_queue = multiprocessing.Queue(self.be.bsz * 10)
+        self.sampler = multiprocessing.Process(target=generate_sample_stream, args=(self.filenames, self.sample_queue, self.validation, remove_history))
+        self.sampler.daemon = True
+        self.sampler.start()
+
     @property
     def nbatches(self):
         return -((self.start - self.ndata) // self.be.bsz)
@@ -123,16 +139,9 @@ class HDF5Iterator(NervanaDataIterator):
             tuple: The next minibatch which includes both features and labels.
         """
 
-        sample_queue = multiprocessing.Queue(self.be.bsz * 10)
-        stop_event = multiprocessing.Event()
-
-        sampler = multiprocessing.Process(target=generate_sample_stream, args=(self.filenames, sample_queue, stop_event, self.validation))
-        sampler.daemon = True
-        sampler.start()
-
         for minibatch_idx in range(self.start, self.ndata, self.be.bsz):
             for idx in range(self.be.bsz):
-                tmp_in, tmp_y = sample_queue.get()
+                tmp_in, tmp_y = self.sample_queue.get()
                 self.host_image[..., idx] = tmp_in.ravel()
                 self.host_labels[:, idx] = tmp_y
 
@@ -140,8 +149,6 @@ class HDF5Iterator(NervanaDataIterator):
             self.dev_labels[...] = self.host_labels
 
             yield self.dev_image, self.dev_labels
-
-        stop_event.set()
 
     def predict(self):
         """
@@ -155,9 +162,11 @@ class HDF5Iterator(NervanaDataIterator):
         for offset in range(self.start, inputs.shape[0], self.be.bsz):
             offset = min(offset, inputs.shape[0] - self.be.bsz)
             sl = slice(offset, offset + self.be.bsz)
-
             # neon wants CHWN
-            subset = inputs[sl, ...].transpose((1, 2, 3, 0))
+            subset = inputs[sl, ...]
+            if self.remove_history:
+                subset[:, 4:12, :, :] = 0
+            subset = subset.transpose((1, 2, 3, 0))
             self.dev_image[...] = subset.reshape((-1, self.be.bsz)).copy().astype(self.dev_image.dtype)
 
             yield self.dev_image, self.labels[0][sl, ...], sl

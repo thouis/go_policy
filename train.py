@@ -5,7 +5,7 @@ from neon.initializers import GlorotUniform, Constant, Uniform
 from neon.layers import Conv, GeneralizedCost, Dropout, SkipNode, Activation, Bias, Affine, MergeSum
 from neon.models import Model
 from neon.optimizers import GradientDescentMomentum, Schedule, Adadelta
-from neon.transforms import Rectlin, CrossEntropyBinary, Accuracy, Softmax
+from neon.transforms import Rectlin, CrossEntropyBinary, Accuracy, Softmax, TopKMisclassification
 from neon.callbacks.callbacks import Callbacks
 from neon.util.argparser import NeonArgparser
 from stochastic import DropAll
@@ -16,6 +16,7 @@ from data_iterator import HDF5Iterator
 parser = NeonArgparser(__doc__)
 parser.add_argument("hdf5_list")
 parser.add_argument("workspace_dir")
+parser.add_argument("--load_model", default=None)
 args = parser.parse_args()
 
 # hyperparameters
@@ -35,9 +36,9 @@ def resnet_module(nfm, keep_prob=1.0):
     sidepath = SkipNode()
     mainpath = [Conv(**conv_params((3, 3, nfm))),
                 Bias(Constant()),
+                Dropout(0.9),
                 Conv(**conv_params((3, 3, nfm), relu=False)),
-                Bias(Constant()),
-                DropAll(keep_prob)]
+                Bias(Constant())]
     return [MergeSum([mainpath, sidepath]),
             Activation(Rectlin())]
 
@@ -45,7 +46,8 @@ def build_model(depth, nfm):
     # TODO - per-location bias at each layer
 
     # input - expand to #nfm feature maps
-    layers = [Conv(**conv_params((5, 5, nfm)))]
+    layers = [Conv(**conv_params((5, 5, nfm))),
+              Dropout(0.8)]
 
     for d in range(depth):
         # stochastic depth with falloff from 1.0 to 0.5 from input to final
@@ -58,7 +60,11 @@ def build_model(depth, nfm):
 
     return Model(layers=layers)
 
-model = build_model(network_depth, num_features)
+if args.load_model is None:
+    model = build_model(network_depth, num_features)
+else:
+    print("Starting from {}".format(args.load_model))
+    model = Model(args.load_model)
 
 filenames = [s.strip() for s in open(args.hdf5_list)]
 h5s = [h5py.File(f) for f in filenames]
@@ -68,12 +74,14 @@ train = HDF5Iterator(filenames,
                      [h['X'] for h in h5s],
                      [h['y'] for h in h5s],
                      ndata=(256 * 1024),
-                     validation=False)
+                     validation=False,
+                     remove_history=True)
 valid = HDF5Iterator(filenames,
                      [h['X'] for h in h5s],
                      [h['y'] for h in h5s],
                      ndata=1024,
-                     validation=True)
+                     validation=True,
+                     remove_history=True)
 
 cost = GeneralizedCost(costfunc=CrossEntropyBinary())
 
@@ -84,7 +92,8 @@ opt_gdm = GradientDescentMomentum(learning_rate=0.01,
                                   stochastic_round=args.rounding,
                                   schedule=schedule)
 
-callbacks = Callbacks(model, eval_set=valid, metric=Accuracy(), **args.callback_args)
+callbacks = Callbacks(model, eval_set=valid, metric=TopKMisclassification(5), **args.callback_args)
 callbacks.add_save_best_state_callback(os.path.join(args.workspace_dir, "best_state_h5resnet.pkl"))
-model.fit(train, optimizer=opt_adad, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
+#model.fit(train, optimizer=opt_adad, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
+model.fit(train, optimizer=opt_gdm, num_epochs=num_epochs, cost=cost, callbacks=callbacks)
 model.save_params(os.path.join(args.workspace_dir, "final_state_h5resnet.pkl"))
