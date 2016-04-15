@@ -28,9 +28,9 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
         cur_input = inputs[rand_group]
         cur_labels = labels[rand_group]
         if validation:
-            rand_idx = 0
+            rand_idx = np.random.choice(2)
         else:
-            rand_idx = np.random.randint(1, cur_input.shape[0])
+            rand_idx = np.random.randint(2, cur_input.shape[0])
 
         try:
             tmp_in = cur_input[rand_idx, ...]
