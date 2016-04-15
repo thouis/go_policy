@@ -49,8 +49,8 @@ def compute_deltas(oldparams, model):
 
 # hyperparameters
 num_epochs = 1
-print("Starting from {}".format(args.load_model))
-model = Model(args.load_model)
+print("Starting from {}".format(args.model_pkl))
+model = Model(args.model_pkl)
 
 filenames = [s.strip() for s in open(args.hdf5_list)]
 h5s = [h5py.File(f) for f in filenames]
