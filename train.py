@@ -2,7 +2,7 @@ import h5py
 import os.path
 
 from neon.initializers import GlorotUniform, Constant, Uniform
-from neon.layers import Conv, GeneralizedCost, Dropout, SkipNode, Activation, Bias, Affine, MergeSum
+from neon.layers import Conv, GeneralizedCost, Dropout, SkipNode, Activation, Bias, Affine, MergeSum, BatchNorm
 from neon.models import Model
 from neon.optimizers import GradientDescentMomentum, Schedule, Adadelta
 from neon.transforms import Rectlin, CrossEntropyBinary, Accuracy, Softmax, TopKMisclassification
@@ -34,29 +34,34 @@ def conv_params(fsize, relu=True, batch_norm=True):
 
 def resnet_module(nfm, keep_prob=1.0):
     sidepath = SkipNode()
-    mainpath = [Conv(**conv_params((3, 3, nfm))),
-                Bias(Constant()),
+    mainpath = [BatchNorm(),
+                Activation(Rectlin()),
+                Conv(**conv_params((3, 3, nfm))),
                 Dropout(0.9),
-                Conv(**conv_params((3, 3, nfm), relu=False)),
-                Bias(Constant())]
-    return [MergeSum([mainpath, sidepath]),
-            Activation(Rectlin())]
+                Conv(**conv_params((3, 3, nfm), relu=False, batch_norm=False))]
+    return [MergeSum([sidepath, mainpath])]
 
 def build_model(depth, nfm):
     # TODO - per-location bias at each layer
 
     # input - expand to #nfm feature maps
-    layers = [Conv(**conv_params((5, 5, nfm))),
-              Dropout(0.8)]
+    layers = [Conv(**conv_params((5, 5, nfm), relu=False, batch_norm=False))]
 
     for d in range(depth):
         # stochastic depth with falloff from 1.0 to 0.5 from input to final
         # output
         layers += resnet_module(nfm, 1.0 - (0.5 * d) / (depth - 1))
 
-    # final output: 1 channel
-    layers += [Dropout(0.5),
-               Affine(362, init=Uniform(-1.0 / (362 * nfm), 1.0 / (362 * nfm)), activation=Softmax())]
+    # reduce to 1 feature map, then affine to 362 outputs
+    layers += [Conv(**conv_params((1, 1, 4), relu=False, batch_norm=False)),
+               Affine(362,
+                      bias=Constant(),
+                      init=Uniform(-1.0 / (362 * nfm), 1.0 / (362 * nfm)),
+                      activation=Rectlin()),
+               Affine(362,
+                      bias=Constant(),
+                      init=Uniform(-1.0 / (362), 1.0 / (362)),
+                      activation=Softmax())]
 
     return Model(layers=layers)
 
@@ -67,28 +72,28 @@ else:
     model = Model(args.load_model)
 
 filenames = [s.strip() for s in open(args.hdf5_list)]
-h5s = [h5py.File(f) for f in filenames]
+h5s = [h5py.File(f, 'r') for f in filenames]
 num_moves = sum(h['X'].shape[0] for h in h5s)
 print("Found {} HDF5 files with {} moves".format(len(h5s), num_moves))
 train = HDF5Iterator(filenames,
                      [h['X'] for h in h5s],
                      [h['y'] for h in h5s],
-                     ndata=(256 * 1024),
+                     ndata=(1024 * 1024),
                      validation=False,
-                     remove_history=True)
+                     remove_history=False)
 valid = HDF5Iterator(filenames,
                      [h['X'] for h in h5s],
                      [h['y'] for h in h5s],
                      ndata=1024,
                      validation=True,
-                     remove_history=True)
+                     remove_history=False)
 
 cost = GeneralizedCost(costfunc=CrossEntropyBinary())
 
-schedule = Schedule(step_config=[10, 20], change=[0.001, 0.0001])
+schedule = Schedule(step_config=[2, 10, 20], change=[0.002, 0.001, 0.0001])
 opt_adad = Adadelta(decay=0.99, epsilon=1e-6)
-opt_gdm = GradientDescentMomentum(learning_rate=0.01,
-                                  momentum_coef=0.9,
+opt_gdm = GradientDescentMomentum(learning_rate=0.001,
+                                  momentum_coef=0.95,
                                   stochastic_round=args.rounding,
                                   schedule=schedule)
 

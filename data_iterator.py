@@ -3,6 +3,7 @@ import logging
 import numpy as np
 import multiprocessing
 import time
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
 
     np.random.seed()
     while True:
-        # choose a random move.  If from validation, only first game is chosen
+        # choose a random move.  If from validation, only moves from the first 500 in the data are chosen
         if validation:
             rand_group = np.random.choice(len(inputs))
         else:
@@ -27,16 +28,20 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
 
         cur_input = inputs[rand_group]
         cur_labels = labels[rand_group]
+        validation_base = min(500, cur_input.shape[0] // 2)
+
         if validation:
-            rand_idx = np.random.choice(2)
+            rand_idx = np.random.choice(validation_base)
         else:
-            rand_idx = np.random.randint(2, cur_input.shape[0])
+            rand_idx = np.random.randint(validation_base, cur_input.shape[0])
 
         try:
             tmp_in = cur_input[rand_idx, ...]
         except Exception:
-            print("die", rand_idx, filenames[rand_group], rand_idx)
+            print("die", rand_idx, filenames[rand_group], rand_idx, sys.exc_info())
             raise
+
+        assert tmp_in.shape[-1] == tmp_in.shape[-2] == 19
 
         if remove_history:  # remove most recent move indicators
             tmp_in[4:12, :, :] = 0
@@ -65,6 +70,8 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
             out_pos = 361
         else:
             nr, nc = np.nonzero(tmp_la)
+            assert len(nr) == 1
+            assert len(nc) == 1
             out_pos = int(nr * 19 + nc)
         tmp_y = np.zeros((362,))
         tmp_y[out_pos] = 1
