@@ -1,4 +1,3 @@
-import h5py
 import os.path
 
 from neon.initializers import GlorotUniform, Constant, Uniform
@@ -72,18 +71,11 @@ else:
     model = Model(args.load_model)
 
 filenames = [s.strip() for s in open(args.hdf5_list)]
-h5s = [h5py.File(f, 'r') for f in filenames]
-num_moves = sum(h['X'].shape[0] for h in h5s)
-print("Found {} HDF5 files with {} moves".format(len(h5s), num_moves))
 train = HDF5Iterator(filenames,
-                     [h['X'] for h in h5s],
-                     [h['y'] for h in h5s],
                      ndata=(1024 * 1024),
                      validation=False,
                      remove_history=False)
 valid = HDF5Iterator(filenames,
-                     [h['X'] for h in h5s],
-                     [h['y'] for h in h5s],
                      ndata=1024,
                      validation=True,
                      remove_history=False)

@@ -86,7 +86,7 @@ class HDF5Iterator(NervanaDataIterator):
     transforms.
     """
 
-    def __init__(self, filenames, inputs, labels, ndata=(1024 * 1024), name=None, validation=False, remove_history=False):
+    def __init__(self, filenames, ndata=(1024 * 1024), name=None, validation=False, remove_history=False):
         """
             hdf5_input: input dataset to sample from
             hdf5_labels: labels values to sample from (same sample locations)
@@ -101,13 +101,17 @@ class HDF5Iterator(NervanaDataIterator):
 
         # the data to sample from
         self.filenames = filenames
-        self.inputs = inputs
-        self.input_lengths = [d.shape[0] for d in inputs]
-        self.input_weights = np.array(self.input_lengths, dtype=float) / sum(self.input_lengths)
-        self.labels = labels
+
+        # HDF5 sampler subprocess
+        self.sample_queue = multiprocessing.Queue(self.be.bsz * 10)
+        for idx in range(10):
+            self.sampler = multiprocessing.Process(target=generate_sample_stream, args=(self.filenames, self.sample_queue, self.validation, remove_history))
+            self.sampler.daemon = True
+            self.sampler.start()
 
         # store shape of the input data
-        lshape = inputs[0][0, ...].shape
+        first_batch = self.sample_queue.get()
+        lshape = first_batch[0].shape
         assert lshape[1] == lshape[2]
         assert len(lshape) == 3
         self.shape = lshape
@@ -120,11 +124,6 @@ class HDF5Iterator(NervanaDataIterator):
         self.host_image = np.zeros(self.dev_image.shape, dtype=self.dev_image.dtype)
         self.host_labels = np.zeros(self.dev_labels.shape, dtype=self.dev_labels.dtype)
 
-        # HDF5 sampler subprocess
-        self.sample_queue = multiprocessing.Queue(self.be.bsz * 10)
-        self.sampler = multiprocessing.Process(target=generate_sample_stream, args=(self.filenames, self.sample_queue, self.validation, remove_history))
-        self.sampler.daemon = True
-        self.sampler.start()
 
     @property
     def nbatches(self):
