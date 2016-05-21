@@ -1,1 +1,1 @@
-../neon/.venv/bin/python -i train.py GamesList.txt -z 64 --eval 1 -e 150 Workspace/ -b gpu -v -l training.log --serialize 1 -o traindata.hdf5 -H 5 -s Workspace/snapshot.pkl -r 0
+python -i train_resnet.py --learning_rate 0.001 --games_list GamesList.txt --num_modules 16 --num_features 192 --summary_dir Workspace --checkpoint_dir Workspace

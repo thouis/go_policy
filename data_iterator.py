@@ -68,10 +68,8 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
             assert len(nr) == 1
             assert len(nc) == 1
             out_pos = int(nr * 19 + nc)
-        tmp_y = np.zeros((362,))
-        tmp_y[out_pos] = 1
 
-        queue.put((tmp_in, tmp_y))
+        queue.put((tmp_in, out_pos))
 
 class HDF5Iterator(object):
 
@@ -82,12 +80,11 @@ class HDF5Iterator(object):
     """
 
     def __init__(self, filenames, ndata=(1024 * 1024), batch_size=64,
-                 name=None, validation=False, remove_history=False):
+                 validation=False, remove_history=False):
         """
             hdf5_input: input dataset to sample from
             ndata: iterator pretends to have this many examples, for epochs
         """
-        super(HDF5Iterator, self).__init__(name=name)
         self.ndata = ndata
         self.batch_size = batch_size
         self.validation = validation
@@ -97,7 +94,7 @@ class HDF5Iterator(object):
         self.filenames = filenames
 
         # HDF5 sampler subprocess
-        self.sample_queue = multiprocessing.Queue(self.be.bsz * 10)
+        self.sample_queue = multiprocessing.Queue(self.batch_size* 10)
         for idx in range(10):
             self.sampler = multiprocessing.Process(target=generate_sample_stream, args=(self.filenames, self.sample_queue, self.validation, remove_history))
             self.sampler.daemon = True
@@ -112,7 +109,7 @@ class HDF5Iterator(object):
 
     def new_buffers(self):
         dest_input = np.empty((self.batch_size,) + self.lshape, dtype=np.uint8)
-        dest_labels = np.empty([self.batch_size, 362], dtype=np.uint8)
+        dest_labels = np.empty([self.batch_size], dtype=np.uint16)
         return dest_input, dest_labels
 
     def __iter__(self):
@@ -126,6 +123,6 @@ class HDF5Iterator(object):
             for idx in range(self.batch_size):
                 tmp_in, tmp_y = self.sample_queue.get()
                 buf_input[idx, ...] = tmp_in
-                buf_labels[idx, ...] = tmp_y
+                buf_labels[idx] = tmp_y
 
             yield buf_input, buf_labels
