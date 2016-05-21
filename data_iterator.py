@@ -1,13 +1,8 @@
 import h5py
-import logging
 import numpy as np
 import multiprocessing
-import time
 import sys
 
-logger = logging.getLogger(__name__)
-
-from neon.data import NervanaDataIterator
 
 def generate_sample_stream(filenames, queue, validation=False, remove_history=False):
     '''generates individual samples, puts them on a queue to be read elsewhere'''
@@ -78,7 +73,7 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
 
         queue.put((tmp_in, tmp_y))
 
-class HDF5Iterator(NervanaDataIterator):
+class HDF5Iterator(object):
 
     """
     Iterates over subsamples of an HDF5 volume, returning subimages of a
@@ -86,16 +81,15 @@ class HDF5Iterator(NervanaDataIterator):
     transforms.
     """
 
-    def __init__(self, filenames, ndata=(1024 * 1024), name=None, validation=False, remove_history=False):
+    def __init__(self, filenames, ndata=(1024 * 1024), batch_size=64,
+                 name=None, validation=False, remove_history=False):
         """
             hdf5_input: input dataset to sample from
-            hdf5_labels: labels values to sample from (same sample locations)
             ndata: iterator pretends to have this many examples, for epochs
         """
         super(HDF5Iterator, self).__init__(name=name)
         self.ndata = ndata
-        assert self.ndata >= self.be.bsz
-        self.start = 0  # how many subimages we have sampled
+        self.batch_size = batch_size
         self.validation = validation
         self.remove_history = remove_history
 
@@ -114,29 +108,12 @@ class HDF5Iterator(NervanaDataIterator):
         lshape = first_batch[0].shape
         assert lshape[1] == lshape[2]
         assert len(lshape) == 3
-        self.shape = lshape
         self.lshape = lshape
-        self.npix = np.prod(lshape)
 
-        # buffers
-        self.dev_image = self.be.iobuf(self.npix)
-        self.dev_labels = self.be.iobuf(362)
-        self.host_image = np.zeros(self.dev_image.shape, dtype=self.dev_image.dtype)
-        self.host_labels = np.zeros(self.dev_labels.shape, dtype=self.dev_labels.dtype)
-
-
-    @property
-    def nbatches(self):
-        return -((self.start - self.ndata) // self.be.bsz)
-
-    def reset(self):
-        """
-        For resetting the starting index of this dataset back to zero.
-        Relevant for when one wants to call repeated evaluations on the dataset
-        but don't want to wrap around for the last uneven minibatch
-        Not necessary when ndata is divisible by batch size
-        """
-        self.start = 0
+    def new_buffers(self):
+        dest_input = np.empty((self.batch_size,) + self.lshape, dtype=np.uint8)
+        dest_labels = np.empty([self.batch_size, 362], dtype=np.uint8)
+        return dest_input, dest_labels
 
     def __iter__(self):
         """
@@ -144,35 +121,11 @@ class HDF5Iterator(NervanaDataIterator):
         Yields:
             tuple: The next minibatch which includes both features and labels.
         """
-
-        for minibatch_idx in range(self.start, self.ndata, self.be.bsz):
-            for idx in range(self.be.bsz):
+        for minibatch_idx in range(self.ndata):
+            buf_input, buf_labels = self.new_buffers()
+            for idx in range(self.batch_size):
                 tmp_in, tmp_y = self.sample_queue.get()
-                self.host_image[..., idx] = tmp_in.ravel()
-                self.host_labels[:, idx] = tmp_y
+                buf_input[idx, ...] = tmp_in
+                buf_labels[idx, ...] = tmp_y
 
-            self.dev_image[...] = self.host_image
-            self.dev_labels[...] = self.host_labels
-
-            yield self.dev_image, self.dev_labels
-
-    def predict(self):
-        """
-        Defines a generator that can be used to iterate over this dataset in order
-        Yields:
-            tuple: The next batch which includes data and slice
-        """
-        assert len(self.inputs) == 1
-        inputs = self.inputs[0]
-
-        for offset in range(self.start, inputs.shape[0], self.be.bsz):
-            offset = min(offset, inputs.shape[0] - self.be.bsz)
-            sl = slice(offset, offset + self.be.bsz)
-            # neon wants CHWN
-            subset = inputs[sl, ...]
-            if self.remove_history:
-                subset[:, 4:12, :, :] = 0
-            subset = subset.transpose((1, 2, 3, 0))
-            self.dev_image[...] = subset.reshape((-1, self.be.bsz)).copy().astype(self.dev_image.dtype)
-
-            yield self.dev_image, self.labels[0][sl, ...], sl
+            yield buf_input, buf_labels
