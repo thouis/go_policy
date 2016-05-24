@@ -51,70 +51,95 @@ def model(input_data, training_switch, keep_prob_var, num_modules=20, depth=64):
     with tf.variable_scope("output"):
         W = tf.Variable(tf.truncated_normal([19 * 19 * 2, 362], stddev=(1.0 / 361 * 2)), name='W')
         B = tf.Variable(tf.constant(0.0, shape=[362]))
-        model = tf.matmul(model.reshape([-1, 19 * 19 * 2]), W) + B
+        model = tf.matmul(tf.reshape(model, [-1, 19 * 19 * 2]), W) + B
 
     return model
 
 def run_training():
-    data_set = data_iterator.HDF5Iterator([f.strip() for f in open(FLAGS.games_list)],
-                                          batch_size=FLAGS.batch_size)
+    train_set = data_iterator.HDF5Iterator([f.strip() for f in open(FLAGS.games_list)],
+                                          batch_size=FLAGS.batch_size, ndata=1024 * 1024)
+    validation_set = data_iterator.HDF5Iterator([f.strip() for f in open(FLAGS.games_list)],
+                                                batch_size=FLAGS.batch_size, ndata=1024, validation=True)
 
     sess = tf.Session()
     summaries = []
 
-    in_data = tf.placeholder(tf.uint8, (FLAGS.batch_size,) + data_set.lshape, name='input')
-    in_training = tf.Variable(True, name='in_training')
-    keep_prob = tf.constant(0.9, name='keep_prob')
+    in_data = tf.placeholder(tf.uint8, (FLAGS.batch_size,) + train_set.lshape, name='input')
+    in_training = tf.Variable(True, name='in_training', trainable=False)
+    keep_prob = tf.Variable(0.9, name='keep_prob', trainable=False)
 
-    predictions = model(in_data, in_training, keep_prob, num_modules=FLAGS.num_modules)
+    predictions = model(in_data, in_training, keep_prob,
+                        num_modules=FLAGS.num_modules,
+                        depth=FLAGS.num_features)
 
-    label = tf.placeholder(tf.uint64, (FLAGS.batch_size,))
+    label = tf.placeholder(tf.int64, (FLAGS.batch_size,))
 
     loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(predictions, label))
-    accuracy = tf.reduce_mean(tf.argmax(label, 1) == tf.argmax(predictions, 1))
-    top5 = tf.nn.in_top_k(predictions, label, 5)
+    accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(predictions, 1), label), "float"))
+    top5 = tf.reduce_mean(tf.cast(tf.nn.in_top_k(predictions, label, 5), "float"))
 
     summaries.append(tf.scalar_summary("loss", loss))
     summaries.append(tf.scalar_summary("accuracy", accuracy))
     summaries.append(tf.scalar_summary("top5", top5))
 
-    step_var = tf.Variable(0)
-    inc_step = step_var.assign_add(1)
-
     opt = tf.train.MomentumOptimizer(FLAGS.learning_rate, 0.95)
     train_op = opt.minimize(loss, colocate_gradients_with_ops=True, aggregation_method=2)
     summary_op = tf.merge_summary(summaries)
 
+    step_var = tf.Variable(0, trainable=False)
+    inc_step = step_var.assign_add(1)
+
     saver = tf.train.Saver()
     sess.run(tf.initialize_all_variables())
-    print(sess.graph)
     summary_writer = tf.train.SummaryWriter(FLAGS.summary_dir, sess.graph)
 
+
+    sess.run(tf.initialize_all_variables())
     checkpoint = tf.train.latest_checkpoint(FLAGS.checkpoint_dir)
     if checkpoint:
         print("restoring from checkpoint", checkpoint)
         saver.restore(sess, checkpoint)
+        print(sess.run([step_var]))
     else:
         print("Couldn't find checkpoint to restore from.  Starting fresh.")
 
     while True:
-        batch_input, batch_labels = data_set.batch(FLAGS.batch_size)
-        feed_dict = {in_data: batch_input, label: batch_labels, in_training: True}
+        step_val, = sess.run([inc_step])
+        total_loss = 0.0
+        for batchidx, (batch_input, batch_labels) in enumerate(train_set.minibatches()):
+            feed_dict = {in_data: batch_input, label: batch_labels, in_training: True, keep_prob: 0.9}
 
-        start_time = time.time()
-        _, step, loss_val, accuracy_val, top5_val, summary_str = sess.run([train_op, inc_step, loss, accuracy_val, top5, summary_op],
-                                                                          feed_dict=feed_dict)
+            start_time = time.time()
+            _, loss_val, accuracy_val, top5_val, summary_str = sess.run([train_op, loss, accuracy, top5, summary_op],
+                                                                        feed_dict=feed_dict)
+            total_loss += loss_val
+            duration = time.time() - start_time
 
-        summary_writer.add_summary(summary_str, step)
+            print('Train %d: %d/%d: loss = %.3f (avg: %.3f), acc = %.2f, top5 = %.2f (%.1f sec)' %
+                  (step_val, batchidx, train_set.ndata // train_set.batch_size, loss_val, total_loss /
+                   (batchidx + 1), accuracy_val, top5_val, duration))
+
+        total_loss = 0.0
+        for batchidx, (batch_input, batch_labels) in enumerate(validation_set.minibatches()):
+            feed_dict = {in_data: batch_input, label: batch_labels, in_training: False, keep_prob: 1.0}
+
+            start_time = time.time()
+            loss_val, accuracy_val, top5_val, summary_str = sess.run([loss, accuracy, top5, summary_op],
+                                                                     feed_dict=feed_dict)
+            total_loss += loss_val
+            duration = time.time() - start_time
+
+            print('Validation %d: %d/%d: loss = %.3f (avg: %.3f), acc = %.2f, top5 = %.2f (%.1f sec)' %
+                  (step_val, batchidx, validation_set.ndata // validation_set.batch_size, loss_val, total_loss /
+                   (batchidx + 1), accuracy_val, top5_val, duration))
+
+
+
+        summary_writer.add_summary(summary_str, step_val)
         summary_writer.flush()
-        saver.save(sess, os.path.join(FLAGS.checkpoint_dir, "checkpoint"), global_step=step)
+        saver.save(sess, os.path.join(FLAGS.checkpoint_dir, "checkpoint"), global_step=step_val)
 
-        duration = time.time() - start_time
-
-        print('Step %d: loss = %.3f, acc = %.2f, top5 = %.2f (%.1f sec)' %
-              (step, loss_val, accuracy_val, top5_val, duration))
-
-        if step >= int(FLAGS.iterations):
+        if step_val > int(FLAGS.iterations):
             break
 
     # End train loop

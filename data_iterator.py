@@ -69,6 +69,9 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
             assert len(nc) == 1
             out_pos = int(nr * 19 + nc)
 
+        # move feature maps to last index
+        tmp_in = np.transpose(tmp_in, [1, 2, 0])
+
         queue.put((tmp_in, out_pos))
 
 class HDF5Iterator(object):
@@ -103,7 +106,8 @@ class HDF5Iterator(object):
         # store shape of the input data
         first_batch = self.sample_queue.get()
         lshape = first_batch[0].shape
-        assert lshape[1] == lshape[2]
+        print(lshape)
+        assert lshape[0] == lshape[1]
         assert len(lshape) == 3
         self.lshape = lshape
 
@@ -112,13 +116,13 @@ class HDF5Iterator(object):
         dest_labels = np.empty([self.batch_size], dtype=np.uint16)
         return dest_input, dest_labels
 
-    def __iter__(self):
+    def minibatches(self):
         """
         Defines a generator that can be used to iterate over this dataset.
         Yields:
             tuple: The next minibatch which includes both features and labels.
         """
-        for minibatch_idx in range(self.ndata):
+        for minibatch_idx in range(0, self.ndata, self.batch_size):
             buf_input, buf_labels = self.new_buffers()
             for idx in range(self.batch_size):
                 tmp_in, tmp_y = self.sample_queue.get()
