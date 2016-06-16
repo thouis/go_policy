@@ -2,14 +2,13 @@ import h5py
 import logging
 import numpy as np
 import multiprocessing
-import time
 import sys
+from neon.data import NervanaDataIterator
 
 logger = logging.getLogger(__name__)
 
-from neon.data import NervanaDataIterator
 
-def generate_sample_stream(filenames, queue, validation=False, remove_history=False):
+def generate_sample_stream(filenames, queue, validation=False, remove_history=False, minimal_set=False):
     '''generates individual samples, puts them on a queue to be read elsewhere'''
 
     hdf5s = [h5py.File(f, 'r') for f in filenames]
@@ -45,6 +44,9 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
 
         if remove_history:  # remove most recent move indicators
             tmp_in[4:12, :, :] = 0
+        if minimal_set:
+            # player, opponent, empty, legal
+            tmp_in = tmp_in[(0, 1, 2, -1), :, :]
 
         tmp_la = np.zeros((19, 19))
         dest_row, dest_col = cur_labels[rand_idx, ...]
@@ -78,15 +80,16 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
 
         queue.put((tmp_in, tmp_y))
 
-class HDF5Iterator(NervanaDataIterator):
 
+class HDF5Iterator(NervanaDataIterator):
     """
     Iterates over subsamples of an HDF5 volume, returning subimages of a
     certain shape taken from the input and labels datasets, with random
     transforms.
     """
 
-    def __init__(self, filenames, ndata=(1024 * 1024), name=None, validation=False, remove_history=False):
+    def __init__(self, filenames, ndata=(1024 * 1024), name=None,
+                 validation=False, remove_history=False, minimal_set=False):
         """
             hdf5_input: input dataset to sample from
             hdf5_labels: labels values to sample from (same sample locations)
@@ -98,6 +101,7 @@ class HDF5Iterator(NervanaDataIterator):
         self.start = 0  # how many subimages we have sampled
         self.validation = validation
         self.remove_history = remove_history
+        self.minimal_set = minimal_set
 
         # the data to sample from
         self.filenames = filenames
@@ -105,7 +109,11 @@ class HDF5Iterator(NervanaDataIterator):
         # HDF5 sampler subprocess
         self.sample_queue = multiprocessing.Queue(self.be.bsz * 10)
         for idx in range(10):
-            self.sampler = multiprocessing.Process(target=generate_sample_stream, args=(self.filenames, self.sample_queue, self.validation, remove_history))
+            self.sampler = multiprocessing.Process(target=generate_sample_stream,
+                                                   args=(self.filenames, self.sample_queue,
+                                                         self.validation, self.remove_history,
+                                                         self.minimal_set))
+
             self.sampler.daemon = True
             self.sampler.start()
 
@@ -123,7 +131,6 @@ class HDF5Iterator(NervanaDataIterator):
         self.dev_labels = self.be.iobuf(362)
         self.host_image = np.zeros(self.dev_image.shape, dtype=self.dev_image.dtype)
         self.host_labels = np.zeros(self.dev_labels.shape, dtype=self.dev_labels.dtype)
-
 
     @property
     def nbatches(self):
