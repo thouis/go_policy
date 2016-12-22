@@ -1,7 +1,7 @@
 import os.path
 
 from neon.initializers import GlorotUniform, Constant, Uniform
-from neon.layers import Conv, GeneralizedCost, Dropout, SkipNode, Activation, Affine, MergeSum, BatchNorm
+from neon.layers import Conv, GeneralizedCost, Dropout, SkipNode, Activation, Affine, MergeSum, BatchNorm, BranchNode, SingleOutputTree, Multicost
 from neon.models import Model
 from neon.optimizers import GradientDescentMomentum, ExpSchedule, Adadelta
 from neon.transforms import Explin, CrossEntropyMulti, Softmax, TopKMisclassification
@@ -9,6 +9,9 @@ from neon.callbacks.callbacks import Callbacks
 from neon.util.argparser import NeonArgparser
 
 from data_iterator import HDF5Iterator
+
+import numpy as np
+np.seterr(all='raise')
 
 # parse the command line arguments
 parser = NeonArgparser(__doc__)
@@ -19,8 +22,8 @@ args = parser.parse_args()
 
 # hyperparameters
 num_epochs = args.epochs
-network_depth = 20
-num_features = 256
+network_depth = 25
+num_features = 256 + 128
 
 
 def conv_params(fsize, elu=True, batch_norm=True):
@@ -33,13 +36,12 @@ def conv_params(fsize, elu=True, batch_norm=True):
 
 
 def resnet_module(nfm, keep_prob=1.0):
-    print("layer with droupout keep = {}".format(keep_prob))
-    sidepath = [SkipNode(), Dropout(keep_prob)]
+    sidepath = [SkipNode()]
     mainpath = [BatchNorm(),
                 Activation(Explin()),
                 Conv(**conv_params((3, 3, nfm))),
-                Conv(**conv_params((3, 3, nfm), elu=False, batch_norm=False)),
-                Dropout(keep_prob)]
+                Dropout(0.9),
+                Conv(**conv_params((3, 3, nfm), elu=False, batch_norm=False))]
     return [MergeSum([sidepath, mainpath])]
 
 
@@ -53,8 +55,21 @@ def build_model(depth, nfm):
         layers += resnet_module(nfm, 1.0 - (0.5 * d) / (depth - 1))
 
     # reduce to 4 feature maps (minimum for neon), then affine to 362 outputs
-    layers += [Conv(**conv_params((1, 1, 4), elu=False, batch_norm=False)),
-               Affine(362,
+    br = BranchNode()
+    layers += [br]
+
+    output1 = layers + [Conv(**conv_params((1, 1, 4), elu=False, batch_norm=False)),
+                        Affine(362 * 2,
+                               bias=Constant(),
+                               init=Uniform(-1.0 / (362 * nfm), 1.0 / (362 * nfm)),
+                               activation=Explin()),
+                        Affine(362,
+                               bias=Constant(),
+                               init=Uniform(-1.0 / (362), 1.0 / (362)),
+                               activation=Softmax())]
+
+    output2 = [br, Conv(**conv_params((1, 1, 4), elu=False, batch_norm=False)),
+               Affine(362 * 2,
                       bias=Constant(),
                       init=Uniform(-1.0 / (362 * nfm), 1.0 / (362 * nfm)),
                       activation=Explin()),
@@ -63,7 +78,17 @@ def build_model(depth, nfm):
                       init=Uniform(-1.0 / (362), 1.0 / (362)),
                       activation=Softmax())]
 
-    return Model(layers=layers)
+    output3 = [br, Conv(**conv_params((1, 1, 4), elu=False, batch_norm=False)),
+               Affine(362 * 2,
+                      bias=Constant(),
+                      init=Uniform(-1.0 / (362 * nfm), 1.0 / (362 * nfm)),
+                      activation=Explin()),
+               Affine(362,
+                      bias=Constant(),
+                      init=Uniform(-1.0 / (362), 1.0 / (362)),
+                      activation=Softmax())]
+
+    return Model(layers=SingleOutputTree([output1, output2, output3]))
 
 
 if args.load_model is None:
@@ -77,20 +102,28 @@ train = HDF5Iterator(filenames,
                      ndata=(1024 * 1024),
                      validation=False,
                      remove_history=False,
-                     minimal_set=True)
+                     minimal_set=False,
+                     next_N=3)
 valid = HDF5Iterator(filenames,
-                     ndata=(16 * 1024),
+                     ndata=(16 * 2014),
                      validation=True,
                      remove_history=False,
-                     minimal_set=True)
+                     minimal_set=False,
+                     next_N=1)
 
-cost = GeneralizedCost(costfunc=CrossEntropyMulti(usebits=True))
+out1, out2, out3 = model.layers.get_terminal()
+
+cost = Multicost(costs=[GeneralizedCost(costfunc=CrossEntropyMulti(usebits=True)),
+                        GeneralizedCost(costfunc=CrossEntropyMulti(usebits=True)),
+                        GeneralizedCost(costfunc=CrossEntropyMulti(usebits=True))])
 
 schedule = ExpSchedule(decay=(1.0 / 50))  # halve the learning rate every 50 epochs
 opt_gdm = GradientDescentMomentum(learning_rate=0.01,
                                   momentum_coef=0.9,
                                   stochastic_round=args.rounding,
+                                  gradient_clip_value=1,
                                   gradient_clip_norm=5,
+                                  wdecay=0.0001,
                                   schedule=schedule)
 
 callbacks = Callbacks(model, eval_set=valid, metric=TopKMisclassification(5), **args.callback_args)

@@ -2,14 +2,25 @@ import h5py
 import logging
 import numpy as np
 import multiprocessing
-import sys
 from neon.data import NervanaDataIterator
 
 logger = logging.getLogger(__name__)
 
 
-def generate_sample_stream(filenames, queue, validation=False, remove_history=False, minimal_set=False):
+def do_flips(arr, flip_horiz, flip_vert, transpose):
+    if flip_horiz:
+        arr = arr[:, :, ::-1]
+    if flip_vert:
+        arr = arr[:, ::-1, :]
+    if transpose:
+        arr = arr.transpose((0, 2, 1))
+    return arr
+
+
+def generate_sample_stream(filenames, queue, validation=False, remove_history=False, minimal_set=False, next_N=1):
     '''generates individual samples, puts them on a queue to be read elsewhere'''
+
+    np.seterr(all='raise')
 
     hdf5s = [h5py.File(f, 'r') for f in filenames]
     inputs = [h['X'] for h in hdf5s]
@@ -32,53 +43,47 @@ def generate_sample_stream(filenames, queue, validation=False, remove_history=Fa
         if validation:
             rand_idx = np.random.choice(validation_base)
         else:
-            rand_idx = np.random.randint(validation_base, cur_input.shape[0])
+            rand_idx = np.random.randint(validation_base, cur_input.shape[0] - next_N + 1)
 
-        try:
-            tmp_in = cur_input[rand_idx, ...]
-        except Exception:
-            print("die", rand_idx, filenames[rand_group], rand_idx, sys.exc_info())
-            raise
+        actions = cur_labels[rand_idx:(rand_idx + next_N), ...].copy()
+        # if there's a pass, assume the other side passed as well, and replace all the moves with pass
+        # TODO - maybe we need an "end of game" marker in the processed SGFs
+        saw_pass = False
+        for offset in range(next_N):
+            saw_pass = saw_pass or actions[offset, 0] == -1
+            if saw_pass:
+                actions[offset, :] = [-1, -1]
 
-        assert tmp_in.shape[-1] == tmp_in.shape[-2] == 19
+        state = cur_input[rand_idx, ...].copy()
+        assert state.shape[-1] == state.shape[-2] == 19
 
         if remove_history:  # remove most recent move indicators
-            tmp_in[4:12, :, :] = 0
+            state[4:12, :, :] = 0
         if minimal_set:
             # player, opponent, empty, legal
-            tmp_in = tmp_in[(0, 1, 2, -1), :, :]
+            state = state[(0, 1, 2, -1), :, :]
 
-        tmp_la = np.zeros((19, 19))
-        dest_row, dest_col = cur_labels[rand_idx, ...]
+        flip1 = np.random.randint(0, 2)
+        flip2 = np.random.randint(0, 2)
+        transpose = np.random.randint(0, 2)
 
-        if dest_row >= 0:
-            tmp_la[dest_row, dest_col] = 1
+        state = do_flips(state, flip1, flip2, transpose)
 
-        # FLIPS
-        if np.random.randint(0, 2) == 1:
-            tmp_in = tmp_in[:, ::-1, :]
-            tmp_la = tmp_la[::-1, :]
-        if np.random.randint(0, 2) == 1:
-            tmp_in = tmp_in[:, :, ::-1]
-            tmp_la = tmp_la[:, ::-1]
+        actions_linear = np.zeros((next_N, 362))
+        for offset in range(next_N):
+            if actions[offset, 0] != -1:
+                action_pos = np.zeros((1, 19, 19))
+                action_pos[0,
+                           actions[offset, 0],
+                           actions[offset, 1]] = 1
+                action_pos = do_flips(action_pos,
+                                      flip1, flip2, transpose)
+                _, nr, nc = np.nonzero(action_pos)
+                actions_linear[offset, nr * 19 + nc] = 1
+            else:
+                actions_linear[offset, 361] = 1
 
-        # random transpose
-        if np.random.randint(0, 2) == 1:
-            tmp_in = tmp_in.transpose((0, 2, 1))
-            tmp_la = tmp_la.transpose((1, 0))
-
-        if dest_row == -1:
-            # PASS
-            out_pos = 361
-        else:
-            nr, nc = np.nonzero(tmp_la)
-            assert len(nr) == 1
-            assert len(nc) == 1
-            out_pos = int(nr * 19 + nc)
-        tmp_y = np.zeros((362,))
-        tmp_y[out_pos] = 1
-
-        queue.put((tmp_in, tmp_y))
+        queue.put((state, actions_linear))
 
 
 class HDF5Iterator(NervanaDataIterator):
@@ -89,7 +94,7 @@ class HDF5Iterator(NervanaDataIterator):
     """
 
     def __init__(self, filenames, ndata=(1024 * 1024), name=None,
-                 validation=False, remove_history=False, minimal_set=False):
+                 validation=False, remove_history=False, minimal_set=False, next_N=1):
         """
             hdf5_input: input dataset to sample from
             hdf5_labels: labels values to sample from (same sample locations)
@@ -102,6 +107,7 @@ class HDF5Iterator(NervanaDataIterator):
         self.validation = validation
         self.remove_history = remove_history
         self.minimal_set = minimal_set
+        self.next_N = next_N
 
         # the data to sample from
         self.filenames = filenames
@@ -112,7 +118,7 @@ class HDF5Iterator(NervanaDataIterator):
             self.sampler = multiprocessing.Process(target=generate_sample_stream,
                                                    args=(self.filenames, self.sample_queue,
                                                          self.validation, self.remove_history,
-                                                         self.minimal_set))
+                                                         self.minimal_set, self.next_N))
 
             self.sampler.daemon = True
             self.sampler.start()
@@ -128,9 +134,9 @@ class HDF5Iterator(NervanaDataIterator):
 
         # buffers
         self.dev_image = self.be.iobuf(self.npix)
-        self.dev_labels = self.be.iobuf(362)
+        self.dev_labels = [self.be.iobuf(362) for idx in range(self.next_N)]
         self.host_image = np.zeros(self.dev_image.shape, dtype=self.dev_image.dtype)
-        self.host_labels = np.zeros(self.dev_labels.shape, dtype=self.dev_labels.dtype)
+        self.host_labels = [np.zeros(self.dev_labels[0].shape, dtype=self.dev_labels[0].dtype) for idx in range(self.next_N)]
 
     @property
     def nbatches(self):
@@ -154,13 +160,17 @@ class HDF5Iterator(NervanaDataIterator):
 
         for minibatch_idx in range(self.start, self.ndata, self.be.bsz):
             for idx in range(self.be.bsz):
-                tmp_in, tmp_y = self.sample_queue.get()
-                self.host_image[..., idx] = tmp_in.ravel()
-                self.host_labels[:, idx] = tmp_y
+                state, tmp_y = self.sample_queue.get()
+                self.host_image[..., idx] = state.ravel()
+                for r in range(self.next_N):
+                    self.host_labels[r][:, idx] = tmp_y[r, :]
 
             self.dev_image[...] = self.host_image
-            self.dev_labels[...] = self.host_labels
+            for r in range(self.next_N):
+                self.dev_labels[r][...] = self.host_labels[r]
 
+            if self.next_N == 1:
+                yield self.dev_image, self.dev_labels[0]
             yield self.dev_image, self.dev_labels
 
     def predict(self):
